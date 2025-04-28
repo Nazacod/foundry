@@ -63,6 +63,57 @@ sol! {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfigTestDiff {
+    pub from_for_fn1: Address,
+    pub from_for_fn2: Address,
+    pub addr_contract_with_fn1: Address,
+    pub addr_contract_with_fn2: Address,
+    pub calldata_fn1: Bytes,
+    pub calldata_fn2: Bytes,
+}
+
+impl ConfigTestDiff {
+    pub fn decode_from_bytes(data: &[u8]) -> eyre::Result<Self> {
+        // Skip first 32 bytes (function selector + offset)
+        let data = &data[32..];
+
+        // Each field is 32 bytes
+        if data.len() < 32 * 6 {
+            return Err(eyre::eyre!("Invalid data length for ConfigTestDiff"));
+        }
+
+        let mut pos = 0;
+        let from_for_fn1 = Address::from_slice(&data[pos + 12..pos + 32]);
+        pos += 32;
+        let from_for_fn2 = Address::from_slice(&data[pos + 12..pos + 32]);
+        pos += 32;
+        let addr_contract_with_fn1 = Address::from_slice(&data[pos + 12..pos + 32]);
+        pos += 32;
+        let addr_contract_with_fn2 = Address::from_slice(&data[pos + 12..pos + 32]);
+        pos += 32;
+
+
+        // For bytes fields, first read their offset and length
+        let calldata_fn1_offset = U256::from_be_slice(&data[pos..pos + 32]).to::<usize>();
+        let calldata_fn1_len = U256::from_be_slice(&data[calldata_fn1_offset..calldata_fn1_offset + 32]).to::<usize>();
+        let calldata_fn1 = Bytes::copy_from_slice(&data[calldata_fn1_offset + 32..calldata_fn1_offset + 32 + calldata_fn1_len]);
+
+        let calldata_fn2_offset = U256::from_be_slice(&data[pos + 32..pos + 64]).to::<usize>();
+        let calldata_fn2_len = U256::from_be_slice(&data[calldata_fn2_offset..calldata_fn2_offset + 32]).to::<usize>();
+        let calldata_fn2 = Bytes::copy_from_slice(&data[calldata_fn2_offset + 32..calldata_fn2_offset + 32 + calldata_fn2_len]);
+
+        Ok(Self {
+            from_for_fn1,
+            from_for_fn2,
+            addr_contract_with_fn1,
+            addr_contract_with_fn2,
+            calldata_fn1,
+            calldata_fn2,
+        })
+    }
+}
+
 /// EVM executor.
 ///
 /// The executor can be configured with various `revm::Inspector`s, like `Cheatcodes`.

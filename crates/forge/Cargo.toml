@@ -56,6 +56,8 @@ alloy-provider = { workspace = true, features = ["reqwest", "ws", "ipc"] }
 alloy-rpc-types.workspace = true
 alloy-serde.workspace = true
 alloy-signer.workspace = true
+alloy-sol-types.workspace = true
+alloy-sol-macro.workspace = true
 alloy-transport.workspace = true
 
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }

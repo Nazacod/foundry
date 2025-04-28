@@ -120,6 +120,8 @@ pub enum TestFunctionKind {
     AfterInvariant,
     /// `fixture*`.
     Fixture,
+    /// `testDiff*` for differential testing.
+    DifferentialTest,
     /// Unknown kind.
     Unknown,
 }
@@ -129,6 +131,7 @@ impl TestFunctionKind {
     #[inline]
     pub fn classify(name: &str, has_inputs: bool) -> Self {
         match () {
+            _ if name.starts_with("testDiff") => Self::DifferentialTest,
             _ if name.starts_with("test") => {
                 let should_fail = name.starts_with("testFail");
                 if has_inputs {
@@ -158,6 +161,7 @@ impl TestFunctionKind {
             Self::InvariantTest => "invariant",
             Self::AfterInvariant => "afterInvariant",
             Self::Fixture => "fixture",
+            Self::DifferentialTest => "differential",
             Self::Unknown => "unknown",
         }
     }
@@ -168,10 +172,10 @@ impl TestFunctionKind {
         matches!(self, Self::Setup)
     }
 
-    /// Returns `true` if this function is a unit, fuzz, or invariant test.
+    /// Returns `true` if this function is a unit, fuzz, invariant or differential test.
     #[inline]
     pub const fn is_any_test(&self) -> bool {
-        matches!(self, Self::UnitTest { .. } | Self::FuzzTest { .. } | Self::InvariantTest)
+        matches!(self, Self::UnitTest { .. } | Self::FuzzTest { .. } | Self::InvariantTest | Self::DifferentialTest)
     }
 
     /// Returns `true` if this function is a test that should fail.
@@ -210,6 +214,12 @@ impl TestFunctionKind {
         matches!(self, Self::Fixture)
     }
 
+    /// Returns `true` if this function is a differential test.
+    #[inline]
+    pub const fn is_differential_test(&self) -> bool {
+        matches!(self, Self::DifferentialTest)
+    }
+
     /// Returns `true` if this function kind is known.
     #[inline]
     pub const fn is_known(&self) -> bool {
@@ -240,3 +250,4 @@ impl<T: std::error::Error> ErrorExt for T {
         alloy_sol_types::Revert::from(self.to_string()).abi_encode().into()
     }
 }
+

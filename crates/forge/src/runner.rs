@@ -10,19 +10,20 @@ use crate::{
 use alloy_dyn_abi::DynSolValue;
 use alloy_json_abi::Function;
 use alloy_primitives::{address, map::HashMap, Address, Bytes, U256};
+use alloy_sol_macro::sol;
 use eyre::Result;
 use foundry_common::{contracts::ContractsByAddress, TestFunctionExt, TestFunctionKind};
 use foundry_compilers::utils::canonicalized;
 use foundry_config::{Config, InvariantConfig};
 use foundry_evm::{
-    constants::CALLER,
+    constants::{CALLER, CHEATCODE_ADDRESS},
     decode::RevertDecoder,
     executors::{
         fuzz::FuzzedExecutor,
         invariant::{
             check_sequence, replay_error, replay_run, InvariantExecutor, InvariantFuzzError,
         },
-        CallResult, EvmError, Executor, ITest, RawCallResult,
+        CallResult, EvmError, Executor, ITest, RawCallResult, ConfigTestDiff
     },
     fuzz::{
         fixture_name,
@@ -443,6 +444,56 @@ impl<'a> ContractRunner<'a> {
     }
 }
 
+sol! {
+    #[derive(Debug)]
+    struct ChainInfo {
+        uint256 forkId;
+        uint256 chainId;
+    }
+
+    #[derive(Debug)]
+    enum AccountAccessKind {
+        Call,
+        DelegateCall,
+        CallCode,
+        StaticCall,
+        Create,
+        SelfDestruct,
+        Resume,
+        Balance,
+        Extcodesize,
+        Extcodehash,
+        Extcodecopy,
+    }
+
+    #[derive(Debug)]
+    struct StorageAccess {
+        address account;
+        bytes32 slot;
+        bool isWrite;
+        bytes32 previousValue;
+        bytes32 newValue;
+        bool reverted;
+    }
+
+    #[derive(Debug)]
+    struct AccountAccess {
+        ChainInfo chainInfo;
+        AccountAccessKind kind;
+        address account;
+        address accessor;
+        bool initialized;
+        uint256 oldBalance;
+        uint256 newBalance;
+        bytes deployedCode;
+        uint256 value;
+        bytes data;
+        bool reverted;
+        StorageAccess[] storageAccesses;
+        uint64 depth;
+    }
+}
+
 /// Executes a single test function, returning a [`TestResult`].
 struct FunctionRunner<'a> {
     /// The function-level configuration.
@@ -521,6 +572,7 @@ impl<'a> FunctionRunner<'a> {
                     test_bytecode,
                 )
             }
+            TestFunctionKind::DifferentialTest => self.run_differential_test(func),
             _ => unreachable!(),
         }
     }
@@ -889,6 +941,413 @@ impl<'a> FunctionRunner<'a> {
     fn clone_executor(&self) -> Executor {
         self.executor.clone().into_owned()
     }
+
+    /// Runs a differential test.
+    /// This type of test compares the execution results between different implementations
+    fn run_differential_test(mut self, func: &Function) -> TestResult {
+        // Prepare differential test execution
+        if self.prepare_test(func).is_err() {
+            return self.result;
+        }
+
+        // Get the test configuration by calling the test function
+        let revert_decoder = self.revert_decoder();
+        let (get_config_raw_call_result, reason) = match self.executor.to_mut().transact(
+            self.tcfg.sender,
+            self.address,
+            func,
+            &[],
+            U256::ZERO,
+            Some(&revert_decoder),
+        ) {
+            Ok(res) => (res.raw, None),
+            Err(EvmError::Execution(err)) => (err.raw, Some(err.reason)),
+            Err(EvmError::Skip(reason)) => {
+                self.result.single_skip(reason);
+                return self.result;
+            }
+            Err(err) => {
+                self.result.single_fail(Some(err.to_string()));
+                return self.result;
+            }
+        };
+
+        // Try to decode the ConfigTestDiff from the result
+        let config = match ConfigTestDiff::decode_from_bytes(&get_config_raw_call_result.result) {
+            Ok(config) => config,
+            Err(err) => {
+                self.result.single_fail(Some(format!("Failed to decode ConfigTestDiff: {}", err)));
+                return self.result;
+            }
+        };
+
+        // TODO: исправить чтоб ошибки выводились, сейчас - не работает!
+        // Saves the current state of the EVM with 'vm.snapshotState()'
+        let snapshot_calldata = Bytes::from_static(&[0x9c, 0xd2, 0x38, 0x35]);
+        let snapshot_result = match self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, snapshot_calldata, U256::ZERO) {
+            Ok(result) => result,
+            Err(err) => {
+                self.result.single_fail(Some(format!("Snapshot failed: {}", err)));
+                return self.result;
+            }
+        };
+        let snapshot_id = Bytes::copy_from_slice(&snapshot_result.result);
+
+        // Starts recording the EVM state changes with 'vm.startRecording()'
+        let start_recording_calldata = Bytes::from_static(&[0xcf, 0x22, 0xe3, 0xc9]);
+        if let Err(err) = self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, start_recording_calldata, U256::ZERO) {
+            self.result.single_fail(Some(format!("Start recording failed: {}", err)));
+            return self.result;
+        }
+
+        // Execute first function call
+        let first_call = match self.executor.to_mut().transact_raw(
+            config.from_for_fn1,
+            config.addr_contract_with_fn1,
+            config.calldata_fn1,
+            U256::ZERO,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                self.result.single_fail(Some(format!("First function call failed: {}", err)));
+                return self.result;
+            }
+        };
+
+        // eprintln!("first_call_result: {:?}", first_call);
+
+        // Stops recording the EVM state changes with 'vm.stopAndReturnStateDiff()'
+        let stop_recording_calldata = Bytes::from_static(&[0xaa, 0x5c, 0xf9, 0x0e]);
+        let first_diff_result = match self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, stop_recording_calldata, U256::ZERO) {
+            Ok(result) => result,
+            Err(err) => {
+                self.result.single_fail(Some(format!("Stop recording failed: {}", err)));
+                return self.result;
+            }
+        };
+
+        // Decode the state diff result
+        let first_diff: Vec<AccountAccess> = match alloy_sol_types::SolValue::abi_decode(&first_diff_result.result, false) {
+            Ok(diff) => diff,
+            Err(e) => {
+                self.result.single_fail(Some(format!("Failed to decode first state diff: {}", e)));
+                return self.result;
+            }
+        };
+
+        // eprintln!("first_state_diffs: {:?}", first_diff);
+
+        let first_state_changes = process_state_diffs(&first_diff, config.addr_contract_with_fn1);
+        // eprintln!("first_state_changes");
+        // eprintln!("first_own_storage_changes: {:?}", first_state_changes.own_storage_changes);
+        // eprintln!("first_external_storage_changes: {:?}", first_state_changes.external_storage_changes);
+
+        // Reverts the EVM state changes with 'vm.revertToState()'
+        let revert_calldata = Bytes::from_iter([&[0xc2, 0x52, 0x74, 0x05][..], snapshot_id.as_ref()].concat());
+        if let Err(err) = self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, revert_calldata, U256::ZERO) {
+            self.result.single_fail(Some(format!("Revert failed: {}", err)));
+            return self.result;
+        }
+
+        // Starts recording the EVM state changes with 'vm.startRecording()'
+        let start_recording_calldata = Bytes::from_static(&[0xcf, 0x22, 0xe3, 0xc9]);
+        if let Err(err) = self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, start_recording_calldata, U256::ZERO) {
+            self.result.single_fail(Some(format!("Start recording failed: {}", err)));
+            return self.result;
+        }
+
+        // Execute second function call
+        let second_call = match self.executor.to_mut().transact_raw(
+            config.from_for_fn2,
+            config.addr_contract_with_fn2,
+            config.calldata_fn2,
+            U256::ZERO,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                self.result.single_fail(Some(format!("Second function call failed: {}", err)));
+                return self.result;
+            }
+        };
+
+        // Stops recording the EVM state changes with 'vm.stopAndReturnStateDiff()'
+        let stop_recording_calldata = Bytes::from_static(&[0xaa, 0x5c, 0xf9, 0x0e]);
+        let second_diff_result = match self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, stop_recording_calldata, U256::ZERO) {
+            Ok(result) => result,
+            Err(err) => {
+                self.result.single_fail(Some(format!("Stop recording failed: {}", err)));
+                return self.result;
+            }
+        };
+
+        // Decode the state diff result
+        let second_diff: Vec<AccountAccess> = match alloy_sol_types::SolValue::abi_decode(&second_diff_result.result, false) {
+            Ok(diff) => diff,
+            Err(e) => {
+                self.result.single_fail(Some(format!("Failed to decode second state diff: {}", e)));
+                return self.result;
+            }
+        };
+
+        // eprintln!("second_state_diffs: {:?}", second_diff);
+
+        let second_state_changes = process_state_diffs(&second_diff, config.addr_contract_with_fn2);
+        // eprintln!("second_state_changes");
+        // eprintln!("second_own_storage_changes: {:?}", second_state_changes.own_storage_changes);
+        // eprintln!("second_external_storage_changes: {:?}", second_state_changes.external_storage_changes);
+
+        // Compare results and determine success
+        // let success = !first_call.reverted && !second_call.reverted && first_call.result == second_call.result;
+
+        // Compare all state changes
+        let comparison_result = compare_all_state_changes(&first_state_changes, &second_state_changes);
+        
+        eprintln!("State differences:");
+        eprintln!("\nOwn contract changes:");
+        if let Some(balance_diff) = &comparison_result.own_changes.balance_diff {
+            eprintln!("Balance changes:");
+            eprintln!("  First:  {} -> {}", balance_diff.first_old, balance_diff.first_new);
+            eprintln!("  Second: {} -> {}", balance_diff.second_old, balance_diff.second_new);
+        }
+        for (slot, storage_diff) in &comparison_result.own_changes.storage_diffs {
+            eprintln!("Storage slot {:?}:", slot);
+            eprintln!("  First:  {} -> {}", storage_diff.first_old, storage_diff.first_new);
+            eprintln!("  Second: {} -> {}", storage_diff.second_old, storage_diff.second_new);
+        }
+
+        eprintln!("\nExternal contracts changes:");
+        for (addr, changes) in &comparison_result.external_changes {
+            eprintln!("\nAddress: {:?}", addr);
+            if let Some(balance_diff) = &changes.balance_diff {
+                eprintln!("Balance changes:");
+                eprintln!("  First:  {} -> {}", balance_diff.first_old, balance_diff.first_new);
+                eprintln!("  Second: {} -> {}", balance_diff.second_old, balance_diff.second_new);
+            }
+            for (slot, storage_diff) in &changes.storage_diffs {
+                eprintln!("Storage slot {:?}:", slot);
+                eprintln!("  First:  {} -> {}", storage_diff.first_old, storage_diff.first_new);
+                eprintln!("  Second: {} -> {}", storage_diff.second_old, storage_diff.second_new);
+            }
+        }
+
+        // Store both results in the test result
+        // TODO: Implement self.result.diff_result
+        // self.result.single_result(success, first_call, second_call);
+        //TODO: заглушка для проверки работы
+
+        // Вместо прежней строки:
+        let success = comparison_result.own_changes.balance_diff.is_none()
+            && comparison_result.own_changes.storage_diffs.is_empty()
+            && comparison_result.external_changes.is_empty();
+
+
+        self.result.single_result(success, reason, get_config_raw_call_result);
+        self.result
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValueChange {
+    old: U256,
+    new: U256,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+struct StorageSlot(U256);
+
+#[derive(Debug)]
+struct StateChangesByAddress {
+    balance: ValueChange,
+    storage: std::collections::HashMap<StorageSlot, ValueChange>,
+}
+
+#[derive(Debug)]
+struct StateChanges {
+    own_storage_changes: StateChangesByAddress,
+    external_storage_changes: std::collections::HashMap<Address, StateChangesByAddress>,
+}
+
+fn process_state_diffs(diff: &[AccountAccess], contract_address: Address) -> StateChanges {
+    let mut own_storage_changes: Option<StateChangesByAddress> = None;
+    let mut external_storage_changes: std::collections::HashMap<Address, StateChangesByAddress> = std::collections::HashMap::new();
+
+    for access in diff {
+        let mut storage_changes: std::collections::HashMap<StorageSlot, ValueChange> = std::collections::HashMap::new();
+        
+        // Process storage changes
+        for s in access.storageAccesses.iter().filter(|s| s.isWrite) {
+            let slot = StorageSlot(U256::from_be_bytes(s.slot.0));
+            let new_value = U256::from_be_bytes(s.newValue.0);
+            
+            if let Some(existing) = storage_changes.get(&slot) {
+                // If slot exists, keep its old value but update new value
+                storage_changes.insert(slot, ValueChange {
+                    old: existing.old,
+                    new: new_value,
+                });
+            } else {
+                // If slot doesn't exist, create new entry with original old and new values
+                storage_changes.insert(slot, ValueChange {
+                    old: U256::from_be_bytes(s.previousValue.0),
+                    new: new_value,
+                });
+            }
+        }
+
+        let new_balance = access.newBalance;
+        let state_change = if access.account == contract_address {
+            StateChangesByAddress {
+                balance: ValueChange {
+                    old: own_storage_changes
+                        .as_ref()
+                        .map(|existing| existing.balance.old)
+                        .unwrap_or_else(|| access.oldBalance),
+                    new: new_balance,
+                },
+                storage: storage_changes,
+            }
+        } else {
+            let old_balance = external_storage_changes
+                .get(&access.account)
+                .map(|existing| existing.balance.old)
+                .unwrap_or_else(|| access.oldBalance);
+            
+            StateChangesByAddress {
+                balance: ValueChange {
+                    old: old_balance,
+                    new: new_balance,
+                },
+                storage: storage_changes,
+            }
+        };
+
+        if access.account == contract_address {
+            own_storage_changes = Some(state_change);
+        } else {
+            external_storage_changes.insert(access.account, state_change);
+        }
+    }
+
+    // А что если не будет и вовсе own_storage_changes???
+    StateChanges {
+        own_storage_changes: own_storage_changes.unwrap_or_else(|| StateChangesByAddress {
+            balance: ValueChange { old: U256::ZERO, new: U256::ZERO },
+            storage: std::collections::HashMap::new(),
+        }),
+        external_storage_changes,
+    }
+}
+
+#[derive(Debug)]
+struct BalanceComparison {
+    first_old: U256,
+    first_new: U256,
+    second_old: U256,
+    second_new: U256,
+}
+
+#[derive(Debug)]
+struct StorageComparison {
+    first_old: U256,
+    first_new: U256,
+    second_old: U256,
+    second_new: U256,
+}
+
+#[derive(Debug)]
+struct StateDiffComparison {
+    balance_diff: Option<BalanceComparison>,
+    storage_diffs: std::collections::HashMap<StorageSlot, StorageComparison>
+}
+
+fn compare_state_changes(
+    first: &StateChangesByAddress,
+    second: &StateChangesByAddress,
+) -> StateDiffComparison {
+    let mut result = StateDiffComparison {
+        balance_diff: None,
+        storage_diffs: std::collections::HashMap::new(),
+    };
+
+    // Compare balances
+    if first.balance.old != second.balance.old || first.balance.new != second.balance.new {
+        result.balance_diff = Some(BalanceComparison {
+            first_old: first.balance.old,
+            first_new: first.balance.new,
+            second_old: second.balance.old,
+            second_new: second.balance.new,
+        });
+    }
+
+    // Compare storage values
+    let all_slots: std::collections::HashSet<_> = first.storage.keys()
+        .chain(second.storage.keys())
+        .collect();
+
+    for slot in all_slots {
+        let first_values = first.storage.get(slot)
+            .map(|v| (v.old, v.new))
+            .unwrap_or_default();
+        let second_values = second.storage.get(slot)
+            .map(|v| (v.old, v.new))
+            .unwrap_or_default();
+        
+        if first_values != second_values {
+            result.storage_diffs.insert(*slot, StorageComparison {
+                first_old: first_values.0,
+                first_new: first_values.1,
+                second_old: second_values.0,
+                second_new: second_values.1,
+            });
+        }
+    }
+
+    result
+}
+
+#[derive(Debug)]
+struct ComparisonResult {
+    own_changes: StateDiffComparison,
+    external_changes: std::collections::HashMap<Address, StateDiffComparison>,
+}
+
+fn compare_all_state_changes(
+    first_changes: &StateChanges,
+    second_changes: &StateChanges,
+) -> ComparisonResult {
+    let mut result = ComparisonResult {
+        own_changes: compare_state_changes(&first_changes.own_storage_changes, &second_changes.own_storage_changes),
+        external_changes: std::collections::HashMap::new(),
+    };
+
+    // Collect all unique addresses from both states
+    let all_addresses: std::collections::HashSet<_> = first_changes.external_storage_changes.keys()
+        .chain(second_changes.external_storage_changes.keys())
+        .collect();
+
+    // Compare changes for each address
+    for addr in all_addresses {
+        //TODO: исправить
+        let empty_state = StateChangesByAddress {
+            balance: ValueChange { old: U256::ZERO, new: U256::ZERO },
+            storage: std::collections::HashMap::new(),
+        };
+        
+        let first_state = first_changes.external_storage_changes.get(addr)
+            .unwrap_or(&empty_state);
+        
+        let second_state = second_changes.external_storage_changes.get(addr)
+            .unwrap_or(&empty_state);
+
+        let comparison = compare_state_changes(first_state, second_state);
+        
+        // Only include addresses that have differences
+        if comparison.balance_diff.is_some() || !comparison.storage_diffs.is_empty() {
+            result.external_changes.insert(*addr, comparison);
+        }
+    }
+
+    result
 }
 
 fn fuzzer_with_cases(
