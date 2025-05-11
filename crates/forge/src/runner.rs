@@ -1038,9 +1038,9 @@ impl<'a> FunctionRunner<'a> {
         // eprintln!("first_state_diffs: {:?}", first_diff);
 
         let first_state_changes = process_state_diffs(&first_diff, config.addr_contract_with_fn1);
-        // eprintln!("first_state_changes");
-        // eprintln!("first_own_storage_changes: {:?}", first_state_changes.own_storage_changes);
-        // eprintln!("first_external_storage_changes: {:?}", first_state_changes.external_storage_changes);
+        eprintln!("first_state_changes");
+        eprintln!("first_own_storage_changes: {:?}", first_state_changes.own_storage_changes);
+        eprintln!("first_external_storage_changes: {:?}", first_state_changes.external_storage_changes);
 
         // Reverts the EVM state changes with 'vm.revertToState()'
         let revert_calldata = Bytes::from_iter([&[0xc2, 0x52, 0x74, 0x05][..], snapshot_id.as_ref()].concat());
@@ -1092,9 +1092,9 @@ impl<'a> FunctionRunner<'a> {
         // eprintln!("second_state_diffs: {:?}", second_diff);
 
         let second_state_changes = process_state_diffs(&second_diff, config.addr_contract_with_fn2);
-        // eprintln!("second_state_changes");
-        // eprintln!("second_own_storage_changes: {:?}", second_state_changes.own_storage_changes);
-        // eprintln!("second_external_storage_changes: {:?}", second_state_changes.external_storage_changes);
+        eprintln!("second_state_changes");
+        eprintln!("second_own_storage_changes: {:?}", second_state_changes.own_storage_changes);
+        eprintln!("second_external_storage_changes: {:?}", second_state_changes.external_storage_changes);
 
         // Compare results and determine success
         // let success = !first_call.reverted && !second_call.reverted && first_call.result == second_call.result;
@@ -1106,13 +1106,13 @@ impl<'a> FunctionRunner<'a> {
         eprintln!("\nOwn contract changes:");
         if let Some(balance_diff) = &comparison_result.own_changes.balance_diff {
             eprintln!("Balance changes:");
-            eprintln!("  First:  {} -> {}", balance_diff.first_old, balance_diff.first_new);
-            eprintln!("  Second: {} -> {}", balance_diff.second_old, balance_diff.second_new);
+            eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
+            eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
         }
         for (slot, storage_diff) in &comparison_result.own_changes.storage_diffs {
             eprintln!("Storage slot {:?}:", slot);
-            eprintln!("  First:  {} -> {}", storage_diff.first_old, storage_diff.first_new);
-            eprintln!("  Second: {} -> {}", storage_diff.second_old, storage_diff.second_new);
+            eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
+            eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
         }
 
         eprintln!("\nExternal contracts changes:");
@@ -1120,13 +1120,13 @@ impl<'a> FunctionRunner<'a> {
             eprintln!("\nAddress: {:?}", addr);
             if let Some(balance_diff) = &changes.balance_diff {
                 eprintln!("Balance changes:");
-                eprintln!("  First:  {} -> {}", balance_diff.first_old, balance_diff.first_new);
-                eprintln!("  Second: {} -> {}", balance_diff.second_old, balance_diff.second_new);
+                eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
+                eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
             }
             for (slot, storage_diff) in &changes.storage_diffs {
                 eprintln!("Storage slot {:?}:", slot);
-                eprintln!("  First:  {} -> {}", storage_diff.first_old, storage_diff.first_new);
-                eprintln!("  Second: {} -> {}", storage_diff.second_old, storage_diff.second_new);
+                eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
+                eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
             }
         }
 
@@ -1136,8 +1136,21 @@ impl<'a> FunctionRunner<'a> {
         //TODO: заглушка для проверки работы
 
         // Вместо прежней строки:
-        let success = comparison_result.own_changes.balance_diff.is_none()
+        let success_compare_own_state_differences = if config.compare_own_state_differences {
+            comparison_result.own_changes.balance_diff.is_none()
             && comparison_result.own_changes.storage_diffs.is_empty()
+        } else {
+            true
+        };
+
+        let success_compare_returned_values = if config.compare_returned_values {
+            first_call.result == second_call.result
+        } else {
+            true
+        };
+
+        let success = success_compare_own_state_differences
+            && success_compare_returned_values
             && comparison_result.external_changes.is_empty();
 
 
@@ -1148,12 +1161,12 @@ impl<'a> FunctionRunner<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ValueChange {
-    old: U256,
-    new: U256,
+    old: alloy_primitives::FixedBytes<32>,
+    new: alloy_primitives::FixedBytes<32>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct StorageSlot(U256);
+struct StorageSlot(alloy_primitives::FixedBytes<32>);
 
 #[derive(Debug)]
 struct StateChangesByAddress {
@@ -1171,87 +1184,98 @@ fn process_state_diffs(diff: &[AccountAccess], contract_address: Address) -> Sta
     let mut own_storage_changes: Option<StateChangesByAddress> = None;
     let mut external_storage_changes: std::collections::HashMap<Address, StateChangesByAddress> = std::collections::HashMap::new();
 
-    for access in diff {
-        let mut storage_changes: std::collections::HashMap<StorageSlot, ValueChange> = std::collections::HashMap::new();
+    for access in diff.iter().filter(|a| !a.reverted) {
+        // let mut storage_changes: std::collections::HashMap<StorageSlot, ValueChange> = std::collections::HashMap::new();
         
-        // Process storage changes
-        for s in access.storageAccesses.iter().filter(|s| s.isWrite) {
-            let slot = StorageSlot(U256::from_be_bytes(s.slot.0));
-            let new_value = U256::from_be_bytes(s.newValue.0);
-            
-            if let Some(existing) = storage_changes.get(&slot) {
-                // If slot exists, keep its old value but update new value
-                storage_changes.insert(slot, ValueChange {
-                    old: existing.old,
-                    new: new_value,
-                });
-            } else {
-                // If slot doesn't exist, create new entry with original old and new values
-                storage_changes.insert(slot, ValueChange {
-                    old: U256::from_be_bytes(s.previousValue.0),
-                    new: new_value,
-                });
-            }
-        }
-
+        let old_balance = access.oldBalance;
         let new_balance = access.newBalance;
-        let state_change = if access.account == contract_address {
-            StateChangesByAddress {
-                balance: ValueChange {
-                    old: own_storage_changes
-                        .as_ref()
-                        .map(|existing| existing.balance.old)
-                        .unwrap_or_else(|| access.oldBalance),
-                    new: new_balance,
-                },
-                storage: storage_changes,
-            }
-        } else {
-            let old_balance = external_storage_changes
-                .get(&access.account)
-                .map(|existing| existing.balance.old)
-                .unwrap_or_else(|| access.oldBalance);
-            
-            StateChangesByAddress {
-                balance: ValueChange {
-                    old: old_balance,
-                    new: new_balance,
-                },
-                storage: storage_changes,
-            }
-        };
 
         if access.account == contract_address {
-            own_storage_changes = Some(state_change);
-        } else {
-            external_storage_changes.insert(access.account, state_change);
+            match &mut own_storage_changes {
+                Some(state_change) => {
+                    state_change.balance = ValueChange {
+                        old: state_change.balance.old,
+                        new: alloy_primitives::FixedBytes::from(new_balance.to_be_bytes()),
+                    };
+                }
+                None => {
+                    own_storage_changes = Some(StateChangesByAddress {
+                        balance: ValueChange { 
+                            old: alloy_primitives::FixedBytes::from(old_balance.to_be_bytes()), 
+                            new: alloy_primitives::FixedBytes::from(new_balance.to_be_bytes()) 
+                        },
+                        storage: std::collections::HashMap::new(),
+                    });
+                }
+            }
+        }
+        else {
+            if !external_storage_changes.contains_key(&access.account) {
+                external_storage_changes.insert(access.account, StateChangesByAddress {
+                    balance: ValueChange { 
+                        old: alloy_primitives::FixedBytes::from(old_balance.to_be_bytes()), 
+                        new: alloy_primitives::FixedBytes::from(new_balance.to_be_bytes()) 
+                    },
+                    storage: std::collections::HashMap::new(),
+                });
+            }
+            external_storage_changes.get_mut(&access.account).unwrap().balance = ValueChange {
+                old: external_storage_changes.get(&access.account).unwrap().balance.old,
+                new: alloy_primitives::FixedBytes::from(new_balance.to_be_bytes()),
+            };
+        }        
+
+        // Process storage changes
+        for s in access.storageAccesses.iter().filter(|s| s.isWrite) {
+            // eprintln!("s: {:?}", s);
+            let slot = StorageSlot(s.slot);
+            let account = s.account;
+
+            let old_value = U256::from_be_bytes(s.previousValue.0);
+            let new_value = U256::from_be_bytes(s.newValue.0);
+            
+            let storage_changes;    
+            if access.account == contract_address {
+                storage_changes = &mut own_storage_changes.as_mut().unwrap().storage;
+            } else {
+                storage_changes = &mut external_storage_changes.get_mut(&account).unwrap().storage;
+            }
+
+            if !storage_changes.contains_key(&slot) {
+                storage_changes.insert(slot, ValueChange {
+                    old: alloy_primitives::FixedBytes::from(old_value.to_be_bytes()),
+                    new: alloy_primitives::FixedBytes::from(new_value.to_be_bytes()),
+                });
+            } else {
+                storage_changes.insert(slot, ValueChange {
+                    old: storage_changes.get(&slot).unwrap().old,
+                    new: alloy_primitives::FixedBytes::from(new_value.to_be_bytes()),
+                });
+            }
         }
     }
 
     // А что если не будет и вовсе own_storage_changes???
     StateChanges {
-        own_storage_changes: own_storage_changes.unwrap_or_else(|| StateChangesByAddress {
-            balance: ValueChange { old: U256::ZERO, new: U256::ZERO },
-            storage: std::collections::HashMap::new(),
-        }),
-        external_storage_changes,
+        own_storage_changes: own_storage_changes.unwrap(),
+        external_storage_changes: external_storage_changes,
     }
 }
 
 #[derive(Debug)]
 struct BalanceComparison {
-    first_old: U256,
-    first_new: U256,
-    second_old: U256,
-    second_new: U256,
+    first_old: alloy_primitives::FixedBytes<32>,
+    first_new: alloy_primitives::FixedBytes<32>,
+    second_old: alloy_primitives::FixedBytes<32>,
+    second_new: alloy_primitives::FixedBytes<32>,
 }
 
 #[derive(Debug)]
 struct StorageComparison {
-    first_old: U256,
-    first_new: U256,
-    second_old: U256,
-    second_new: U256,
+    first_old: alloy_primitives::FixedBytes<32>,
+    first_new: alloy_primitives::FixedBytes<32>,
+    second_old: alloy_primitives::FixedBytes<32>,
+    second_new: alloy_primitives::FixedBytes<32>,
 }
 
 #[derive(Debug)]
@@ -1329,7 +1353,7 @@ fn compare_all_state_changes(
     for addr in all_addresses {
         //TODO: исправить
         let empty_state = StateChangesByAddress {
-            balance: ValueChange { old: U256::ZERO, new: U256::ZERO },
+            balance: ValueChange { old: alloy_primitives::FixedBytes::ZERO, new: alloy_primitives::FixedBytes::ZERO },
             storage: std::collections::HashMap::new(),
         };
         

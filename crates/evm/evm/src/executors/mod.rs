@@ -71,6 +71,8 @@ pub struct ConfigTestDiff {
     pub addr_contract_with_fn2: Address,
     pub calldata_fn1: Bytes,
     pub calldata_fn2: Bytes,
+    pub compare_returned_values: bool,
+    pub compare_own_state_differences: bool,
 }
 
 impl ConfigTestDiff {
@@ -103,6 +105,10 @@ impl ConfigTestDiff {
         let calldata_fn2_len = U256::from_be_slice(&data[calldata_fn2_offset..calldata_fn2_offset + 32]).to::<usize>();
         let calldata_fn2 = Bytes::copy_from_slice(&data[calldata_fn2_offset + 32..calldata_fn2_offset + 32 + calldata_fn2_len]);
 
+        // Decode boolean fields
+        let compare_returned_values = !U256::from_be_slice(&data[pos + 64..pos + 96]).is_zero();
+        let compare_own_state_differences = !U256::from_be_slice(&data[pos + 96..pos + 128]).is_zero();
+
         Ok(Self {
             from_for_fn1,
             from_for_fn2,
@@ -110,6 +116,8 @@ impl ConfigTestDiff {
             addr_contract_with_fn2,
             calldata_fn1,
             calldata_fn2,
+            compare_returned_values,
+            compare_own_state_differences,
         })
     }
 }
