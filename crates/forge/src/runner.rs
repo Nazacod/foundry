@@ -1014,8 +1014,6 @@ impl<'a> FunctionRunner<'a> {
             }
         };
 
-        // eprintln!("first_call_result: {:?}", first_call);
-
         // Stops recording the EVM state changes with 'vm.stopAndReturnStateDiff()'
         let stop_recording_calldata = Bytes::from_static(&[0xaa, 0x5c, 0xf9, 0x0e]);
         let first_diff_result = match self.executor.to_mut().transact_raw(self.tcfg.sender, CHEATCODE_ADDRESS, stop_recording_calldata, U256::ZERO) {
@@ -1038,9 +1036,6 @@ impl<'a> FunctionRunner<'a> {
         // eprintln!("first_state_diffs: {:?}", first_diff);
 
         let first_state_changes = process_state_diffs(&first_diff, config.addr_contract_with_fn1);
-        eprintln!("first_state_changes");
-        eprintln!("first_own_storage_changes: {:?}", first_state_changes.own_storage_changes);
-        eprintln!("first_external_storage_changes: {:?}", first_state_changes.external_storage_changes);
 
         // Reverts the EVM state changes with 'vm.revertToState()'
         let revert_calldata = Bytes::from_iter([&[0xc2, 0x52, 0x74, 0x05][..], snapshot_id.as_ref()].concat());
@@ -1092,50 +1087,11 @@ impl<'a> FunctionRunner<'a> {
         // eprintln!("second_state_diffs: {:?}", second_diff);
 
         let second_state_changes = process_state_diffs(&second_diff, config.addr_contract_with_fn2);
-        eprintln!("second_state_changes");
-        eprintln!("second_own_storage_changes: {:?}", second_state_changes.own_storage_changes);
-        eprintln!("second_external_storage_changes: {:?}", second_state_changes.external_storage_changes);
-
-        // Compare results and determine success
-        // let success = !first_call.reverted && !second_call.reverted && first_call.result == second_call.result;
 
         // Compare all state changes
         let comparison_result = compare_all_state_changes(&first_state_changes, &second_state_changes);
+
         
-        eprintln!("State differences:");
-        eprintln!("\nOwn contract changes:");
-        if let Some(balance_diff) = &comparison_result.own_changes.balance_diff {
-            eprintln!("Balance changes:");
-            eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
-            eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
-        }
-        for (slot, storage_diff) in &comparison_result.own_changes.storage_diffs {
-            eprintln!("Storage slot {:?}:", slot);
-            eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
-            eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
-        }
-
-        eprintln!("\nExternal contracts changes:");
-        for (addr, changes) in &comparison_result.external_changes {
-            eprintln!("\nAddress: {:?}", addr);
-            if let Some(balance_diff) = &changes.balance_diff {
-                eprintln!("Balance changes:");
-                eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
-                eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
-            }
-            for (slot, storage_diff) in &changes.storage_diffs {
-                eprintln!("Storage slot {:?}:", slot);
-                eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
-                eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
-            }
-        }
-
-        // Store both results in the test result
-        // TODO: Implement self.result.diff_result
-        // self.result.single_result(success, first_call, second_call);
-        //TODO: заглушка для проверки работы
-
-        // Вместо прежней строки:
         let success_compare_own_state_differences = if config.compare_own_state_differences {
             comparison_result.own_changes.balance_diff.is_none()
             && comparison_result.own_changes.storage_diffs.is_empty()
@@ -1151,8 +1107,50 @@ impl<'a> FunctionRunner<'a> {
 
         let success = success_compare_own_state_differences
             && success_compare_returned_values
-            && comparison_result.external_changes.is_empty();
+            && comparison_result.external_changes.is_empty()
+            && !first_call.reverted 
+            && !second_call.reverted;
 
+        if !success {
+            eprintln!("first_call.reverted={}", first_call.reverted);
+            eprintln!("second_call.reverted={}", second_call.reverted);
+
+            eprintln!("first_state_changes");
+            eprintln!("first_own_storage_changes: {:?}", first_state_changes.own_storage_changes);
+            eprintln!("first_external_storage_changes: {:?}", first_state_changes.external_storage_changes);
+
+            eprintln!("second_state_changes");
+            eprintln!("second_own_storage_changes: {:?}", second_state_changes.own_storage_changes);
+            eprintln!("second_external_storage_changes: {:?}", second_state_changes.external_storage_changes);
+
+            eprintln!("State differences:");
+            eprintln!("\nOwn contract changes:");
+            if let Some(balance_diff) = &comparison_result.own_changes.balance_diff {
+                eprintln!("Balance changes:");
+                eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
+                eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
+            }
+            for (slot, storage_diff) in &comparison_result.own_changes.storage_diffs {
+                eprintln!("Storage slot {:?}:", slot);
+                eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
+                eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
+            }
+
+            eprintln!("\nExternal contracts changes:");
+            for (addr, changes) in &comparison_result.external_changes {
+                eprintln!("\nAddress: {:?}", addr);
+                if let Some(balance_diff) = &changes.balance_diff {
+                    eprintln!("Balance changes:");
+                    eprintln!("  First:  {:?} -> {:?}", balance_diff.first_old, balance_diff.first_new);
+                    eprintln!("  Second: {:?} -> {:?}", balance_diff.second_old, balance_diff.second_new);
+                }
+                for (slot, storage_diff) in &changes.storage_diffs {
+                    eprintln!("Storage slot {:?}:", slot);
+                    eprintln!("  First:  {:?} -> {:?}", storage_diff.first_old, storage_diff.first_new);
+                    eprintln!("  Second: {:?} -> {:?}", storage_diff.second_old, storage_diff.second_new);
+                }
+            }
+        }
 
         self.result.single_result(success, reason, get_config_raw_call_result);
         self.result
